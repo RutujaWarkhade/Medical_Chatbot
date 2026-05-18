@@ -21,6 +21,14 @@ import tempfile
 import time
 from datetime import datetime
 
+from chat_storage import (
+    load_user_chats,
+    create_chat_session,
+    add_chat_message,
+    delete_chat_session
+)
+
+
 # ===== Page Config =====
 st.set_page_config(
     page_title="MediSense AI",
@@ -652,37 +660,50 @@ if "hospital_result" not in st.session_state:
 # ===================================================================
 # HELPER FUNCTIONS  (all original logic preserved)
 # ===================================================================
+# ================================================================
+# CHAT STORAGE FUNCTIONS
+# ================================================================
 
 def create_new_session():
-    session_id = str(int(time.time()))
-    st.session_state.chat_sessions[session_id] = {
-        "title": "New Chat",
-        "messages": [],
-        "created_at": datetime.now().strftime("%d %b %Y, %I:%M %p")
-    }
+
+    user_email = st.session_state.user_info["email"]
+
+    session_id = create_chat_session(user_email)
+
+    # Reload chats from JSON storage
+    st.session_state.chat_sessions = load_user_chats(user_email)
+
     st.session_state.current_session_id = session_id
+
     return session_id
 
 def get_current_messages():
+
     sid = st.session_state.current_session_id
+
     if sid and sid in st.session_state.chat_sessions:
         return st.session_state.chat_sessions[sid]["messages"]
+
     return []
 
 def add_message(role, content, extra=None):
+
     sid = st.session_state.current_session_id
+
     if sid:
-        msg = {"role": role, "content": content, "extra": extra or {}}
-        st.session_state.chat_sessions[sid]["messages"].append(msg)
-        user_msgs = [
-            m for m in st.session_state.chat_sessions[sid]["messages"]
-            if m["role"] == "user"
-        ]
-        if len(user_msgs) == 1:
-            title = user_msgs[0]["content"][:40]
-            st.session_state.chat_sessions[sid]["title"] = (
-                title + ("..." if len(user_msgs[0]["content"]) > 40 else "")
-            )
+
+        user_email = st.session_state.user_info["email"]
+
+        add_chat_message(
+            user_email=user_email,
+            session_id=sid,
+            role=role,
+            content=content,
+            extra=extra
+        )
+
+        # Reload updated chats
+        st.session_state.chat_sessions = load_user_chats(user_email)
 
 def translate_to_en(text, source_lang="auto"):
     try:
@@ -866,7 +887,20 @@ if not st.session_state.logged_in:
                     ok, user, msg = login_user(login_email, login_pass)
                     if ok:
                         st.session_state.logged_in = True
-                        st.session_state.user_info  = user
+                        st.session_state.user_info = user
+
+                        # LOAD PREVIOUS CHAT HISTORY
+                        st.session_state.chat_sessions = load_user_chats(user["email"])
+
+                        # LOAD LAST SESSION IF AVAILABLE
+                        if st.session_state.chat_sessions:
+                            latest_session = sorted(
+                                st.session_state.chat_sessions.keys(),
+                                reverse=True
+                            )[0]
+
+                            st.session_state.current_session_id = latest_session
+
                         st.success(f"✅ {msg}")
                         time.sleep(0.6)
                         st.rerun()
@@ -994,11 +1028,6 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    if st.button("↩ Sign Out", use_container_width=True, key="signout_btn"):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
-
     st.markdown("<hr style='margin:0.75rem 0'>", unsafe_allow_html=True)
 
     # Language
@@ -1028,34 +1057,73 @@ with st.sidebar:
     st.markdown("<hr style='margin:0.75rem 0'>", unsafe_allow_html=True)
 
     # Chat history
-    st.markdown('<div class="section-label">💬 Chat History</div>', unsafe_allow_html=True)
+    # Chat history
+    st.markdown(
+        '<div class="section-label">💬 Chat History</div>',
+        unsafe_allow_html=True
+    )
+
     sessions = sorted(
         st.session_state.chat_sessions.items(),
-        key=lambda x: x[0], reverse=True
+        key=lambda x: x[0],
+        reverse=True
     )
 
     for sid, session in sessions:
+
         is_active = (
             sid == st.session_state.current_session_id
             and st.session_state.active_tab == "chat"
         )
+
         col1, col2 = st.columns([5, 1])
+
         with col1:
+
             icon = "🟢" if is_active else "💬"
+
             if st.button(
                 f"{icon} {session['title']}",
                 key=f"btn_{sid}",
                 use_container_width=True,
                 type="primary" if is_active else "secondary"
             ):
+
                 st.session_state.current_session_id = sid
                 st.session_state.active_tab = "chat"
+
                 st.rerun()
+
         with col2:
-            if st.button("🗑", key=f"del_{sid}", help="Delete session"):
-                del st.session_state.chat_sessions[sid]
+
+            if st.button(
+                "🗑",
+                key=f"del_{sid}",
+                help="Delete session"
+            ):
+
+                delete_chat_session(user["email"], sid)
+
+                st.session_state.chat_sessions = load_user_chats(
+                    user["email"]
+                )
+
                 if st.session_state.current_session_id == sid:
-                    st.session_state.current_session_id = None
+
+                    remaining_sessions = list(
+                        st.session_state.chat_sessions.keys()
+                    )
+
+                    if remaining_sessions:
+
+                        st.session_state.current_session_id = sorted(
+                            remaining_sessions,
+                            reverse=True
+                        )[0]
+
+                    else:
+                        st.session_state.current_session_id = None
+
                 st.rerun()
 
     if not sessions:
@@ -1161,15 +1229,21 @@ if st.session_state.active_tab == "hospital":
 # CHAT TAB
 # ────────────────────────────────────────────────────────────────────
 if st.session_state.current_session_id is None:
+
+    if not st.session_state.chat_sessions:
+        create_new_session()
+        st.rerun()
+
     st.markdown("""
     <div class="medisense-card fade-in" style="text-align:center;padding:3rem 2rem">
         <div style="font-size:3rem;margin-bottom:1rem">💬</div>
-        <h3 style="font-family:'Playfair Display',serif;margin:0 0 0.5rem">Start a Conversation</h3>
+        <h3 style="font-family:'Playfair Display',serif;margin:0 0 0.5rem">Select a Conversation</h3>
         <p style="color:var(--muted);margin:0;font-size:0.88rem">
-            Click <strong>➕ New Chat</strong> in the sidebar to ask your first health question.
+            Choose a previous chat from sidebar or create a new one.
         </p>
     </div>
     """, unsafe_allow_html=True)
+
     st.stop()
 
 # Medical disclaimer (inline, compact)
